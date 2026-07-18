@@ -202,6 +202,11 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
     const node = nodesRef.current.find((n) => n.id === id);
     if (!node || !simRef.current) return;
     dragMovedRef.current = false;
+    // En pantallas táctiles no hay "cursor" que entre/salga del nodo — el
+    // toque en sí hace ese papel: tocar = empieza el resaltado, soltar = lo
+    // termina. En dispositivos con mouse esto no se toca: ahí el resaltado
+    // ya sigue al cursor solo, vía onMouseEnter/onMouseLeave.
+    if (!supportsHoverRef.current) setHoveredId(id);
     const startX = e.clientX;
     const startY = e.clientY;
     simRef.current.alphaTarget(0.25).restart();
@@ -222,6 +227,7 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
       simRef.current.alphaTarget(0);
       node.fx = null;
       node.fy = null;
+      if (!supportsHoverRef.current) setHoveredId(null);
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
     }
