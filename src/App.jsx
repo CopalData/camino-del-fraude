@@ -26,6 +26,14 @@ const PALETTE = {
 const CENTRAL_ID = 'P_CENTRAL';
 const API_BASE = 'https://blue-api-ekgw.onrender.com';
 
+// Los dos colores de aura elegibles desde el panel admin para categorizar
+// influencia en el fraude: azul marino (Partido Nacional) o rojo (Partido
+// Liberal). El nodo central mantiene su azul fijo, sin pasar por esto.
+const HALO_COLORS = {
+  azul: 'rgba(47,92,158,0.28)',
+  rojo: 'rgba(200,30,42,0.28)',
+};
+
 const GLOBAL_STYLE = `
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 * { box-sizing: border-box; }
@@ -51,7 +59,7 @@ function initialsOf(name) {
     .toUpperCase();
 }
 
-function Avatar({ name, photoUrl, size = 80, ring, halo }) {
+function Avatar({ name, photoUrl, size = 80, ring, haloColor }) {
   return (
     <div
       style={{
@@ -65,7 +73,7 @@ function Avatar({ name, photoUrl, size = 80, ring, halo }) {
         justifyContent: 'center',
         overflow: 'hidden',
         flexShrink: 0,
-        boxShadow: halo ? '0 0 0 6px rgba(47,92,158,0.25)' : 'none',
+        boxShadow: haloColor ? `0 0 0 6px ${haloColor}` : 'none',
         transition: 'border-color 180ms ease, box-shadow 180ms ease',
       }}
     >
@@ -130,14 +138,25 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
       return { ...n, x: p ? p.x : dims.width / 2 + (Math.random() - 0.5) * 160, y: p ? p.y : dims.height / 2 + (Math.random() - 0.5) * 160 };
     });
     const simLinks = data.links.map((l) => ({ ...l }));
+    // Distancia al centro según categoría de influencia: 1 (más cerca) a
+    // 3 (más lejos). Las conexiones que no tocan al nodo central usan la
+    // distancia estándar, sin verse afectadas por categorías.
+    const distanceByCategory = (cat) => (cat === 1 ? 130 : cat === 3 ? 255 : 195);
     // Colisión más amplia que el simple radio del avatar: deja lugar para
     // el nombre y el cargo debajo del círculo, así con muchos nodos no se
     // pisan las etiquetas de texto entre sí.
+    const collideByCategory = (cat) => (cat === 1 ? 82 : cat === 3 ? 64 : 70);
     const sim = d3.forceSimulation(simNodes)
-      .force('link', d3.forceLink(simLinks).id((d) => d.id).distance(160).strength(0.65))
+      .force('link', d3.forceLink(simLinks).id((d) => d.id).strength(0.65).distance((l) => {
+        const isSourceCentral = l.source.id === CENTRAL_ID;
+        const isTargetCentral = l.target.id === CENTRAL_ID;
+        if (!isSourceCentral && !isTargetCentral) return 160;
+        const other = isSourceCentral ? l.target : l.source;
+        return distanceByCategory(other.categoria || 2);
+      }))
       .force('charge', d3.forceManyBody().strength(-480))
       .force('center', d3.forceCenter(dims.width / 2, dims.height / 2))
-      .force('collide', d3.forceCollide((d) => (d.id === CENTRAL_ID ? 92 : 72)))
+      .force('collide', d3.forceCollide((d) => (d.id === CENTRAL_ID ? 92 : collideByCategory(d.categoria || 2))))
       .on('tick', () => bump());
     nodesRef.current = simNodes;
     linksRef.current = simLinks;
@@ -290,7 +309,8 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
             const ring = isCentral
               ? (isHovered || isSelected ? PALETTE.partyBlueGlow : PALETTE.partyBlue)
               : (isSelected ? PALETTE.accent : isHovered ? PALETTE.accentGlow : 'rgba(255,255,255,0.16)');
-            const avatarSize = isCentral ? 96 : 76;
+            const avatarSize = isCentral ? 96 : (n.categoria === 1 ? 84 : n.categoria === 3 ? 68 : 74);
+            const haloColor = isCentral ? HALO_COLORS.azul : HALO_COLORS[n.auraColor] || HALO_COLORS.azul;
             return (
               <div
                 key={n.id}
@@ -307,7 +327,7 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
                   opacity: dim ? 0.25 : 1, zIndex: isHovered || isSelected ? 20 : 5,
                 }}
               >
-                <Avatar name={n.name} photoUrl={n.photoUrl} size={avatarSize} ring={ring} halo={isCentral} />
+                <Avatar name={n.name} photoUrl={n.photoUrl} size={avatarSize} ring={ring} haloColor={haloColor} />
                 <span style={{ marginTop: 8, fontWeight: 500, lineHeight: 1.2, fontFamily: 'Inter, sans-serif', color: PALETTE.textPrimary, fontSize: isCentral ? 13.5 : 12.5 }}>
                   {n.name}
                 </span>
@@ -448,7 +468,7 @@ function Drawer({ node, onClose }) {
                   photoUrl={node.photoUrl}
                   size={node.id === CENTRAL_ID ? 132 : 120}
                   ring={node.id === CENTRAL_ID ? PALETTE.partyBlue : 'rgba(255,255,255,0.16)'}
-                  halo={node.id === CENTRAL_ID}
+                  haloColor={node.id === CENTRAL_ID ? HALO_COLORS.azul : HALO_COLORS[node.auraColor] || HALO_COLORS.azul}
                 />
               </div>
               <h2
