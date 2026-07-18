@@ -93,13 +93,23 @@ function Avatar({ name, photoUrl, size = 80, ring, halo }) {
 
 function GraphCanvas({ data, onNodeClick, selectedId }) {
   const containerRef = useRef(null);
+  const zoomLayerRef = useRef(null);
   const [dims, setDims] = useState({ width: 900, height: 600 });
   const nodesRef = useRef([]);
   const linksRef = useRef([]);
   const simRef = useRef(null);
   const dragMovedRef = useRef(false);
+  const zoomBehaviorRef = useRef(null);
+  const transformRef = useRef(d3.zoomIdentity);
   const [, bump] = useReducer((x) => x + 1, 0);
   const [hoveredId, setHoveredId] = useState(null);
+  // Los dispositivos táctiles no tienen "hover" real — algunos navegadores
+  // emulan mouseenter/mouseleave al tocar, de forma inconsistente, y eso es
+  // lo que causaba el temblor al tocar un nodo en celular. Detectamos si el
+  // dispositivo soporta hover de verdad, y solo ahí escuchamos esos eventos.
+  const supportsHoverRef = useRef(
+    typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(hover: hover)').matches
+  );
 
   useEffect(() => {
     const el = containerRef.current;
@@ -114,37 +124,80 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
 
   useEffect(() => {
     const prevPositions = {};
-    nodesRef.current.forEach((n) => {
-      prevPositions[n.id] = { x: n.x, y: n.y };
-    });
-
+    nodesRef.current.forEach((n) => { prevPositions[n.id] = { x: n.x, y: n.y }; });
     const simNodes = data.nodes.map((n) => {
       const p = prevPositions[n.id];
-      return {
-        ...n,
-        x: p ? p.x : dims.width / 2 + (Math.random() - 0.5) * 160,
-        y: p ? p.y : dims.height / 2 + (Math.random() - 0.5) * 160,
-      };
+      return { ...n, x: p ? p.x : dims.width / 2 + (Math.random() - 0.5) * 160, y: p ? p.y : dims.height / 2 + (Math.random() - 0.5) * 160 };
     });
     const simLinks = data.links.map((l) => ({ ...l }));
-
-    const sim = d3
-      .forceSimulation(simNodes)
+    // Colisión más amplia que el simple radio del avatar: deja lugar para
+    // el nombre y el cargo debajo del círculo, así con muchos nodos no se
+    // pisan las etiquetas de texto entre sí.
+    const sim = d3.forceSimulation(simNodes)
       .force('link', d3.forceLink(simLinks).id((d) => d.id).distance(160).strength(0.65))
-      .force('charge', d3.forceManyBody().strength(-420))
+      .force('charge', d3.forceManyBody().strength(-480))
       .force('center', d3.forceCenter(dims.width / 2, dims.height / 2))
-      .force('collide', d3.forceCollide((d) => (d.id === CENTRAL_ID ? 74 : 58)))
+      .force('collide', d3.forceCollide((d) => (d.id === CENTRAL_ID ? 92 : 72)))
       .on('tick', () => bump());
-
     nodesRef.current = simNodes;
     linksRef.current = simLinks;
     simRef.current = sim;
-
     return () => sim.stop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.nodes.length, data.links.length, dims.width, dims.height]);
 
+  // Pan y zoom del fondo — rueda del mouse o pellizco (touch) para zoom,
+  // arrastrar el fondo (no un nodo) para moverte por el mapa. Independiente
+  // del arrastre de nodos individuales, que sigue abajo.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const zoomBehavior = d3
+      .zoom()
+      .scaleExtent([0.3, 3])
+      .on('zoom', (event) => {
+        transformRef.current = event.transform;
+        if (zoomLayerRef.current) {
+          zoomLayerRef.current.style.transform = `translate(${event.transform.x}px, ${event.transform.y}px) scale(${event.transform.k})`;
+        }
+      });
+    zoomBehaviorRef.current = zoomBehavior;
+    d3.select(container).call(zoomBehavior);
+    return () => {
+      d3.select(container).on('.zoom', null);
+    };
+  }, []);
+
+  function fitToView() {
+    const nodes = nodesRef.current;
+    const container = containerRef.current;
+    const zoomBehavior = zoomBehaviorRef.current;
+    if (!nodes.length || !container || !zoomBehavior) return;
+    const pad = 90;
+    const xs = nodes.map((n) => n.x || 0);
+    const ys = nodes.map((n) => n.y || 0);
+    const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
+    const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
+    const w = Math.max(maxX - minX, 1), h = Math.max(maxY - minY, 1);
+    const scale = Math.max(0.3, Math.min(3, Math.min(dims.width / w, dims.height / h)));
+    const tx = dims.width / 2 - (scale * (minX + maxX)) / 2;
+    const ty = dims.height / 2 - (scale * (minY + maxY)) / 2;
+    d3.select(container)
+      .transition()
+      .duration(450)
+      .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+  }
+
+  // Encuadra la red sola al cargar (o cuando cambia la cantidad de
+  // personas), para que no arranque recortada en pantallas chicas.
+  useEffect(() => {
+    const t = window.setTimeout(fitToView, 700);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.nodes.length]);
+
   function handlePointerDown(e, id) {
+    e.stopPropagation(); // que no dispare también el pan del fondo
     e.preventDefault();
     const node = nodesRef.current.find((n) => n.id === id);
     if (!node || !simRef.current) return;
@@ -155,13 +208,14 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
     node.fx = node.x;
     node.fy = node.y;
     const rect = containerRef.current.getBoundingClientRect();
-
     function move(ev) {
-      if (Math.abs(ev.clientX - startX) > 4 || Math.abs(ev.clientY - startY) > 4) {
-        dragMovedRef.current = true;
-      }
-      node.fx = ev.clientX - rect.left;
-      node.fy = ev.clientY - rect.top;
+      if (Math.abs(ev.clientX - startX) > 8 || Math.abs(ev.clientY - startY) > 8) dragMovedRef.current = true;
+      // Convierte la posición de la pantalla a coordenadas del mapa,
+      // deshaciendo el zoom/paneo actual — si no, arrastrar con zoom
+      // aplicado movería el nodo a una posición equivocada.
+      const [simX, simY] = transformRef.current.invert([ev.clientX - rect.left, ev.clientY - rect.top]);
+      node.fx = simX;
+      node.fy = simY;
       bump();
     }
     function up() {
@@ -175,154 +229,109 @@ function GraphCanvas({ data, onNodeClick, selectedId }) {
     window.addEventListener('pointerup', up);
   }
 
+  // En touch no hay hover: tocar un nodo lo selecciona (abre el drawer) Y
+  // resalta sus conexiones en el mismo gesto — por eso usamos hover O
+  // selección, lo que esté activo, para decidir qué iluminar.
+  const activeId = hoveredId || selectedId;
+
   const connectedIds = useMemo(() => {
-    if (!hoveredId) return null;
-    const s = new Set([hoveredId]);
+    if (!activeId) return null;
+    const s = new Set([activeId]);
     linksRef.current.forEach((l) => {
       const sid = typeof l.source === 'object' ? l.source.id : l.source;
       const tid = typeof l.target === 'object' ? l.target.id : l.target;
-      if (sid === hoveredId) s.add(tid);
-      if (tid === hoveredId) s.add(sid);
+      if (sid === activeId) s.add(tid);
+      if (tid === activeId) s.add(sid);
     });
     return s;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hoveredId]);
+  }, [activeId]);
 
   return (
     <div
       ref={containerRef}
       style={{
-        position: 'relative',
-        width: '100%',
-        height: '100%',
-        overflow: 'hidden',
+        position: 'relative', width: '100%', height: '100%', overflow: 'hidden',
+        touchAction: 'none',
         backgroundColor: PALETTE.void,
         backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.05) 1px, transparent 1px)',
         backgroundSize: '26px 26px',
       }}
     >
-      <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
-        {linksRef.current.map((l) => {
-          const sx = l.source && l.source.x;
-          const sy = l.source && l.source.y;
-          const tx = l.target && l.target.x;
-          const ty = l.target && l.target.y;
-          if (sx == null || tx == null) return null;
-          const sid = l.source.id;
-          const tid = l.target.id;
-          const isHot = hoveredId && (sid === hoveredId || tid === hoveredId);
-          const dim = hoveredId && !isHot;
-          return (
-            <line
-              key={l.id}
-              x1={sx}
-              y1={sy}
-              x2={tx}
-              y2={ty}
-              stroke={isHot ? PALETTE.partyBlueGlow : PALETTE.partyBlue}
-              strokeWidth={isHot ? 2.5 : 1.25}
-              style={{
-                transition: 'stroke 180ms ease, opacity 180ms ease',
-                opacity: dim ? 0.12 : isHot ? 1 : 0.65,
-              }}
-            />
-          );
-        })}
-      </svg>
+      <div ref={zoomLayerRef} style={{ position: 'absolute', inset: 0, transformOrigin: '0 0' }}>
+        <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
+          {linksRef.current.map((l) => {
+            const sx = l.source && l.source.x, sy = l.source && l.source.y, tx = l.target && l.target.x, ty = l.target && l.target.y;
+            if (sx == null || tx == null) return null;
+            const sid = l.source.id, tid = l.target.id;
+            const isHot = activeId && (sid === activeId || tid === activeId);
+            const dim = activeId && !isHot;
+            return (
+              <line key={l.id} x1={sx} y1={sy} x2={tx} y2={ty}
+                stroke={isHot ? PALETTE.partyBlueGlow : PALETTE.partyBlue} strokeWidth={isHot ? 2.5 : 1.25}
+                style={{ transition: 'stroke 180ms ease, opacity 180ms ease', opacity: dim ? 0.12 : isHot ? 1 : 0.65 }} />
+            );
+          })}
+        </svg>
 
-      <div style={{ position: 'absolute', inset: 0 }}>
-        {nodesRef.current.map((n) => {
-          const isHovered = hoveredId === n.id;
-          const isSelected = selectedId === n.id;
-          const isCentral = n.id === CENTRAL_ID;
-          const isConnected = connectedIds ? connectedIds.has(n.id) : true;
-          const dim = hoveredId && !isConnected;
-          const ring = isCentral
-            ? isHovered || isSelected
-              ? PALETTE.partyBlueGlow
-              : PALETTE.partyBlue
-            : isSelected
-            ? PALETTE.accent
-            : isHovered
-            ? PALETTE.accentGlow
-            : 'rgba(255,255,255,0.16)';
-          const avatarSize = isCentral ? 96 : 76;
-          return (
-            <div
-              key={n.id}
-              onPointerDown={(e) => handlePointerDown(e, n.id)}
-              onMouseEnter={() => setHoveredId(n.id)}
-              onMouseLeave={() => setHoveredId(null)}
-              onClick={() => {
-                if (dragMovedRef.current) return;
-                onNodeClick(n.id);
-              }}
-              style={{
-                position: 'absolute',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                textAlign: 'center',
-                cursor: 'grab',
-                userSelect: 'none',
-                left: (n.x || 0) - 65,
-                top: (n.y || 0) - 46,
-                width: 130,
-                transform: `scale(${isHovered ? 1.1 : 1})`,
-                transformOrigin: 'center top',
-                transition: 'opacity 180ms ease, transform 120ms ease-out',
-                opacity: dim ? 0.25 : 1,
-                zIndex: isHovered || isSelected ? 20 : 5,
-              }}
-            >
-              <Avatar name={n.name} photoUrl={n.photoUrl} size={avatarSize} ring={ring} halo={isCentral} />
-              <span
+        <div style={{ position: 'absolute', inset: 0 }}>
+          {nodesRef.current.map((n) => {
+            const isHovered = hoveredId === n.id;
+            const isSelected = selectedId === n.id;
+            const isCentral = n.id === CENTRAL_ID;
+            const isConnected = connectedIds ? connectedIds.has(n.id) : true;
+            const dim = activeId && !isConnected;
+            const ring = isCentral
+              ? (isHovered || isSelected ? PALETTE.partyBlueGlow : PALETTE.partyBlue)
+              : (isSelected ? PALETTE.accent : isHovered ? PALETTE.accentGlow : 'rgba(255,255,255,0.16)');
+            const avatarSize = isCentral ? 96 : 76;
+            return (
+              <div
+                key={n.id}
+                onPointerDown={(e) => handlePointerDown(e, n.id)}
+                onMouseEnter={supportsHoverRef.current ? () => setHoveredId(n.id) : undefined}
+                onMouseLeave={supportsHoverRef.current ? () => setHoveredId(null) : undefined}
+                onClick={() => { if (dragMovedRef.current) return; onNodeClick(n.id); }}
                 style={{
-                  marginTop: 8,
-                  fontWeight: 500,
-                  lineHeight: 1.2,
-                  fontFamily: 'Inter, sans-serif',
-                  color: PALETTE.textPrimary,
-                  fontSize: isCentral ? 13.5 : 12.5,
+                  position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center',
+                  cursor: 'grab', userSelect: 'none', touchAction: 'none',
+                  left: (n.x || 0) - 65, top: (n.y || 0) - 46, width: 130,
+                  transform: `scale(${isHovered ? 1.1 : 1})`, transformOrigin: 'center top',
+                  transition: 'opacity 180ms ease, transform 120ms ease-out',
+                  opacity: dim ? 0.25 : 1, zIndex: isHovered || isSelected ? 20 : 5,
                 }}
               >
-                {n.name}
-              </span>
-              <span
-                style={{
-                  fontSize: 9,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.12em',
-                  lineHeight: 1.2,
-                  marginTop: 2,
-                  fontFamily: "'JetBrains Mono', monospace",
-                  color: PALETTE.textMuted,
-                }}
-              >
-                {n.cargoActual}
-              </span>
-            </div>
-          );
-        })}
+                <Avatar name={n.name} photoUrl={n.photoUrl} size={avatarSize} ring={ring} halo={isCentral} />
+                <span style={{ marginTop: 8, fontWeight: 500, lineHeight: 1.2, fontFamily: 'Inter, sans-serif', color: PALETTE.textPrimary, fontSize: isCentral ? 13.5 : 12.5 }}>
+                  {n.name}
+                </span>
+                <span style={{ fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.12em', lineHeight: 1.2, marginTop: 2, fontFamily: "'JetBrains Mono', monospace", color: PALETTE.textMuted }}>
+                  {n.cargoActual}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
-      <div
+      <div style={{ position: 'absolute', bottom: 16, left: 16, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', fontFamily: "'JetBrains Mono', monospace", color: PALETTE.textMuted, pointerEvents: 'none' }}>
+        Arrastrá para mover el mapa · Pellizcá o girá la rueda para hacer zoom
+      </div>
+
+      <button
+        onClick={fitToView}
         style={{
-          position: 'absolute',
-          bottom: 16,
-          left: 16,
-          fontSize: 10,
-          letterSpacing: '0.1em',
-          textTransform: 'uppercase',
-          fontFamily: "'JetBrains Mono', monospace",
-          color: PALETTE.textMuted,
+          position: 'absolute', bottom: 16, right: 16, padding: '8px 14px', borderRadius: 6,
+          fontSize: 11, fontFamily: "'JetBrains Mono', monospace", letterSpacing: '0.08em', textTransform: 'uppercase',
+          cursor: 'pointer', backgroundColor: 'rgba(19,19,23,0.9)', border: `1px solid ${PALETTE.border}`, color: PALETTE.textSecondary,
         }}
       >
-        Arrastra los nodos · Pasa el cursor para resaltar vínculos
-      </div>
+        Ajustar vista
+      </button>
     </div>
   );
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Drawer (idéntico al diseño aprobado, sin isAdmin/onDelete:           */
